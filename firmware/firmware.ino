@@ -25,38 +25,38 @@ USBMIDI usbMIDI;
 USBMSC msc;
 
 // =================== Display ===================
-static const uint16_t screenWidth = 480;
-static const uint16_t screenHeight = 320;
+static const uint16_t screenWidth = 320;
+static const uint16_t screenHeight = 240;
 TFT_eSPI tft = TFT_eSPI(screenWidth, screenHeight);
-static const int backlightPin = 21;
+static const int backlightPin = 45;
 
 // =================== I2C / ADC ===================
-#define I2C_SDA 2
-#define I2C_SCL 1
-Adafruit_ADS1115 ads;
+#define I2C_SDA 11
+#define I2C_SCL 12
+Adafruit_ADS1015 ads;
 bool adsPresent = false;
 
 // =================== Sliders ===================
 int previousValues[4] = {0};
 const int SLIDER_THRESHOLD = 15;
 int sliderCalMinRaw[4] = {0, 0, 0, 0};
-int sliderCalMaxRaw[4] = {26500, 26500, 26500, 26500};
+int sliderCalMaxRaw[4] = {1650, 1650, 1650, 1650};
 
 // =================== Buttons ===================
-const int MACRO_PINS[6] = {5, 18, 4, 17, 6, 16};
+const int MACRO_PINS[6] = {7, 15, 10, 13, 47, 48};
 bool macroButtonState[6] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
 bool lastMacroButtonState[6] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
 
 // =================== Encoder ===================
-#define ENC_CLK 46
-#define ENC_DT  3
-#define ENC_SW  9
+#define ENC_CLK 38
+#define ENC_DT  39
+#define ENC_SW  40
 RotaryEncoder encoder(ENC_CLK, ENC_DT, RotaryEncoder::LatchMode::FOUR0);
 long lastEncoderPos = 0;
 
 // =================== Touch ===================
-#define TOUCH_INT_PIN 8
-#define FT6336U_ADDR  0x38
+#define TOUCH_INT_PIN 14
+#define CST816S_ADDR  0x15
 bool touchPresent = false;
 
 // =================== State ===================
@@ -92,12 +92,12 @@ int mapWithCalibration(int rawValue, int sliderIdx = 0) {
 
 // =================== Touch ===================
 int touchReadPoint(uint16_t &x, uint16_t &y) {
-  Wire.beginTransmission(FT6336U_ADDR);
+  Wire.beginTransmission(CST816S_ADDR);
   Wire.write(0x02);
   if (Wire.endTransmission(false) != 0) return 0;
 
   uint8_t buf[5];
-  Wire.requestFrom((uint8_t)FT6336U_ADDR, (uint8_t)5);
+  Wire.requestFrom((uint8_t)CST816S_ADDR, (uint8_t)5);
   for (int i = 0; i < 5 && Wire.available(); i++) buf[i] = Wire.read();
 
   int touches = buf[0] & 0x0F;
@@ -115,13 +115,13 @@ int touchReadPoint(uint16_t &x, uint16_t &y) {
 
 void initTouch() {
   pinMode(TOUCH_INT_PIN, INPUT);
-  Wire.beginTransmission(FT6336U_ADDR);
+  Wire.beginTransmission(CST816S_ADDR);
   if (Wire.endTransmission() == 0) {
     touchPresent = true;
-    Serial.println("FT6336U touch controller initialized");
+    Serial.println("CST816S touch controller initialized");
   } else {
     touchPresent = false;
-    Serial.println("FT6336U not found — touch disabled");
+    Serial.println("CST816S not found — touch disabled");
   }
 }
 
@@ -318,7 +318,7 @@ void setup() {
 
   // Display
   tft.begin();
-  tft.setRotation(3);
+  tft.setRotation(1);
   tft.setSwapBytes(true);
   tft.fillScreen(TFT_BLACK);
 

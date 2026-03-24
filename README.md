@@ -13,10 +13,10 @@ Mixlar Mix is a desktop audio controller that combines 4 analog sliders, 6 progr
 ## Hardware
 
 - **MCU**: ESP32-S3 (dual-core 240MHz, 8MB PSRAM)
-- **Display**: 3.5" 480x320 IPS TFT (ST7796) with capacitive touch (FT6336U)
-- **ADC**: ADS1115 16-bit I2C ADC (4 slider channels)
-- **Sliders**: 4x 60mm linear potentiometers
-- **Buttons**: 6x mechanical switches (Cherry MX compatible)
+- **Display**: 2.8" 320x240 IPS TFT (ILI9341) with capacitive touch (CST816S)
+- **ADC**: ADS1015 12-bit I2C ADC (4 slider channels)
+- **Sliders**: 4x 45mm linear potentiometers
+- **Buttons**: 6x tactile switches
 - **Encoder**: Rotary encoder with push button
 - **Connection**: USB-C (TinyUSB composite: CDC + MIDI + MSC)
 - **Wireless**: BLE 5.0 (UART + MIDI)
@@ -44,7 +44,7 @@ docs/              Documentation
 The firmware runs on ESP32-S3 with Arduino framework and uses:
 - **LVGL** for the touch UI
 - **TinyUSB** for composite USB (Serial CDC + MIDI + Mass Storage)
-- **Adafruit ADS1115** for 16-bit slider ADC
+- **Adafruit ADS1015** for 12-bit slider ADC
 - **BLE** for wireless MIDI and serial
 
 ### Building
@@ -57,7 +57,7 @@ The firmware runs on ESP32-S3 with Arduino framework and uses:
    - USB CDC On Boot: `Enabled`
    - PSRAM: `OPI PSRAM`
    - Flash Size: `16MB`
-4. Install libraries: `Adafruit ADS1X15`, `LVGL`, `RotaryEncoder`
+4. Install libraries: `Adafruit ADS1X15`, `LVGL`, `RotaryEncoder`, `TFT_eSPI`
 5. Open `firmware/firmware.ino` and upload
 
 ## Software
