@@ -1,6 +1,12 @@
 """
 Mixlar Mix — Desktop Control Software
-Connects to Mixlar Mix over USB serial and manages audio routing.
+Connects to Mixlar Mix over USB serial and controls per-app audio.
+
+Usage:
+  1. Edit config.json to assign apps to sliders and actions to macros
+  2. Run: python mixlar.py
+  3. Move sliders on the device to control app volumes
+
 License: MIT
 """
 
@@ -8,6 +14,7 @@ import sys
 import time
 import json
 import threading
+import subprocess
 import serial
 import serial.tools.list_ports
 from pathlib import Path
@@ -22,322 +29,431 @@ except ImportError:
 
 import psutil
 
-# =================== Config ===================
+# =================== Constants ===================
 
 BAUD_RATE = 2_000_000
-DEVICE_NAME = "Mixlar Mix"
-CONFIG_FILE = Path.home() / ".mixlar" / "config.json"
+CONFIG_DIR = Path.home() / ".mixlar"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+DEFAULT_CONFIG = {
+    "sliders": [
+        {"app": "master", "label": "Master"},
+        {"app": "", "label": "Slider 2"},
+        {"app": "", "label": "Slider 3"},
+        {"app": "", "label": "Slider 4"}
+    ],
+    "macros": [
+        {"name": "Macro 1", "action": "none"},
+        {"name": "Macro 2", "action": "none"},
+        {"name": "Macro 3", "action": "none"},
+        {"name": "Macro 4", "action": "none"},
+        {"name": "Macro 5", "action": "none"},
+        {"name": "Macro 6", "action": "none"}
+    ]
+}
+
+# Built-in macro actions
+MACRO_ACTIONS = {
+    "none":            lambda: None,
+    "mute_toggle":     lambda: _media_key(0xAD),
+    "media_playpause": lambda: _media_key(0xB3),
+    "media_next":      lambda: _media_key(0xB0),
+    "media_prev":      lambda: _media_key(0xB1),
+    "vol_up":          lambda: _media_key(0xAF),
+    "vol_down":        lambda: _media_key(0xAE),
+}
+
+def _media_key(vk):
+    """Send a media key press via Windows API."""
+    try:
+        import ctypes
+        KEYEVENTF_EXTENDEDKEY = 0x0001
+        KEYEVENTF_KEYUP = 0x0002
+        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY, 0)
+        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+    except Exception:
+        pass
+
+# =================== Config ===================
+
+def load_config():
+    """Load config from ~/.mixlar/config.json or create default."""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                data = json.load(f)
+                # Merge with defaults for missing keys
+                for key in DEFAULT_CONFIG:
+                    if key not in data:
+                        data[key] = DEFAULT_CONFIG[key]
+                return data
+        except Exception:
+            pass
+
+    # Create default config
+    save_config(DEFAULT_CONFIG)
+    return DEFAULT_CONFIG.copy()
+
+def save_config(data):
+    """Save config to disk."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 # =================== Device Discovery ===================
 
-def find_mixlar_port():
-    """Find the Mixlar Mix serial port by USB VID/PID or product name."""
+def find_device():
+    """Auto-detect Mixlar Mix on USB."""
     for port in serial.tools.list_ports.comports():
+        # Check VID/PID
         if port.vid == 0x1209 and port.pid == 0x4D58:
             return port.device
-        if port.product and "Mixlar" in port.product:
+        # Fallback: Espressif VID
+        if port.vid == 0x303A:
             return port.device
-        # Fallback: Espressif VID with CDC
-        if port.vid == 0x303A and port.description and "Mixlar" in port.description:
+        # Name match
+        if port.product and "Mixlar" in port.product:
             return port.device
     return None
 
+# =================== Audio ===================
 
-# =================== Audio Control ===================
-
-class AudioController:
-    """Windows audio session controller using pycaw."""
+class AudioMixer:
+    """Controls per-app audio on Windows using pycaw."""
 
     def __init__(self):
-        self.sessions = {}
-        self.master_volume = None
-        self._init_master()
+        self.master = None
+        if AUDIO_AVAILABLE:
+            try:
+                dev = AudioUtilities.GetSpeakers()
+                iface = dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                self.master = cast(iface, POINTER(IAudioEndpointVolume))
+            except Exception:
+                pass
 
-    def _init_master(self):
+    def set_volume(self, app_name, value):
+        """Set volume for an app (0-100) or 'master'."""
+        vol = max(0.0, min(1.0, value / 100.0))
+
+        if app_name == "master":
+            if self.master:
+                try:
+                    self.master.SetMasterVolumeLevelScalar(vol, None)
+                except Exception:
+                    pass
+            return
+
         if not AUDIO_AVAILABLE:
             return
-        try:
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            self.master_volume = cast(interface, POINTER(IAudioEndpointVolume))
-        except Exception as e:
-            print(f"[Audio] Master volume init failed: {e}")
 
-    def get_sessions(self):
-        """Get active audio sessions."""
-        if not AUDIO_AVAILABLE:
-            return {}
-        sessions = {}
+        # Find audio session by process name
         try:
             for session in AudioUtilities.GetAllSessions():
                 if session.Process:
-                    name = session.Process.name().replace(".exe", "")
-                    sessions[name.lower()] = session
+                    name = session.Process.name().replace(".exe", "").lower()
+                    if name == app_name.lower():
+                        sv = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        sv.SetMasterVolume(vol, None)
+                        return
         except Exception:
             pass
-        self.sessions = sessions
-        return sessions
 
-    def set_app_volume(self, app_name, volume):
-        """Set volume for a specific app (0.0 - 1.0)."""
+    def list_sessions(self):
+        """List currently active audio sessions."""
+        apps = []
         if not AUDIO_AVAILABLE:
-            return False
-        self.get_sessions()
-        key = app_name.lower()
-        if key in self.sessions:
-            try:
-                vol = self.sessions[key]._ctl.QueryInterface(ISimpleAudioVolume)
-                vol.SetMasterVolume(max(0.0, min(1.0, volume)), None)
-                return True
-            except Exception:
-                pass
-        return False
+            return apps
+        try:
+            for session in AudioUtilities.GetAllSessions():
+                if session.Process:
+                    apps.append(session.Process.name().replace(".exe", ""))
+        except Exception:
+            pass
+        return sorted(set(apps))
 
-    def set_master_volume(self, volume):
-        """Set master volume (0.0 - 1.0)."""
-        if self.master_volume:
-            try:
-                self.master_volume.SetMasterVolumeLevelScalar(
-                    max(0.0, min(1.0, volume)), None
-                )
-                return True
-            except Exception:
-                pass
-        return False
+# =================== Main Controller ===================
 
-    def get_master_volume(self):
-        """Get current master volume (0.0 - 1.0)."""
-        if self.master_volume:
-            try:
-                return self.master_volume.GetMasterVolumeLevelScalar()
-            except Exception:
-                pass
-        return 0.0
+class MixlarController:
+    """
+    Reads serial data from Mixlar Mix and routes it.
 
-
-# =================== Config ===================
-
-class Config:
-    """Persistent configuration for slider/macro assignments."""
+    Device sends:
+      SLIDER,<0-3>,<0-100>     — slider moved
+      MACRO,<0-5>,PRESS        — button pressed
+      MACRO,<0-5>,RELEASE      — button released
+      ENCODER,<delta>          — encoder rotated
+      ENCODER,PRESS            — encoder clicked
+    """
 
     def __init__(self):
-        self.data = {
-            "sliders": [
-                {"app": "master", "label": "Master"},
-                {"app": "spotify", "label": "Spotify"},
-                {"app": "chrome", "label": "Chrome"},
-                {"app": "discord", "label": "Discord"},
-            ],
-            "macros": [
-                {"name": "Mute", "action": "mute_toggle"},
-                {"name": "Play/Pause", "action": "media_playpause"},
-                {"name": "Next", "action": "media_next"},
-                {"name": "Prev", "action": "media_prev"},
-                {"name": "Screenshot", "action": "screenshot"},
-                {"name": "Lock", "action": "lock_screen"},
-            ],
-        }
-        self.load()
-
-    def load(self):
-        if CONFIG_FILE.exists():
-            try:
-                with open(CONFIG_FILE) as f:
-                    self.data.update(json.load(f))
-            except Exception:
-                pass
-
-    def save(self):
-        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(self.data, f, indent=2)
-
-
-# =================== Device Connection ===================
-
-class MixlarDevice:
-    """Serial connection to Mixlar Mix."""
-
-    def __init__(self):
-        self.serial = None
+        self.config = load_config()
+        self.audio = AudioMixer()
+        self.ser = None
         self.connected = False
         self.running = False
-        self.audio = AudioController()
-        self.config = Config()
-        self.on_slider = None
-        self.on_macro = None
-        self.on_encoder = None
 
     def connect(self, port=None):
         """Connect to device."""
         if port is None:
-            port = find_mixlar_port()
-        if port is None:
-            print("[Device] Mixlar Mix not found")
+            port = find_device()
+        if not port:
             return False
 
         try:
-            self.serial = serial.Serial(port, BAUD_RATE, timeout=0.1)
-            time.sleep(0.5)
-            self.serial.write(b"READY\n")
+            self.ser = serial.Serial(port, BAUD_RATE, timeout=0.1)
+            time.sleep(0.3)
+            # Handshake
+            self.ser.write(b"READY\n")
             self.connected = True
-            print(f"[Device] Connected on {port}")
+
+            # Send slider labels to device
+            for i, s in enumerate(self.config["sliders"]):
+                label = s.get("label", f"Slider {i+1}")
+                self.ser.write(f"VOL,{i},{label},50\n".encode())
+
+            # Send macro names to device
+            for i, m in enumerate(self.config["macros"]):
+                name = m.get("name", f"Macro {i+1}")
+                self.ser.write(f"MACRO,{i},{name},\n".encode())
+
             return True
         except Exception as e:
-            print(f"[Device] Connection failed: {e}")
+            print(f"Connection failed: {e}")
             return False
 
-    def disconnect(self):
-        """Disconnect from device."""
-        self.running = False
-        if self.serial:
-            self.serial.close()
-        self.connected = False
+    def _on_slider(self, idx, value):
+        """Handle slider movement."""
+        if idx < 0 or idx >= len(self.config["sliders"]):
+            return
+        app = self.config["sliders"][idx].get("app", "")
+        if app:
+            self.audio.set_volume(app, value)
+            print(f"  Slider {idx+1} -> {app}: {value}%")
 
-    def send(self, command):
-        """Send a command to the device."""
-        if self.serial and self.connected:
+    def _on_macro(self, idx):
+        """Handle macro button press."""
+        if idx < 0 or idx >= len(self.config["macros"]):
+            return
+        macro = self.config["macros"][idx]
+        action = macro.get("action", "none")
+        name = macro.get("name", f"Macro {idx+1}")
+
+        # Check built-in actions
+        if action in MACRO_ACTIONS:
+            print(f"  Button {idx+1} ({name}): {action}")
+            MACRO_ACTIONS[action]()
+        # Custom command (starts with "run:")
+        elif action.startswith("run:"):
+            cmd = action[4:].strip()
+            print(f"  Button {idx+1} ({name}): running '{cmd}'")
             try:
-                self.serial.write(f"{command}\n".encode())
-            except Exception:
-                self.connected = False
+                subprocess.Popen(cmd, shell=True)
+            except Exception as e:
+                print(f"  Error: {e}")
+        # Keyboard shortcut (starts with "key:")
+        elif action.startswith("key:"):
+            keys = action[4:].strip()
+            print(f"  Button {idx+1} ({name}): key '{keys}'")
+            _send_keys(keys)
+        else:
+            print(f"  Button {idx+1} ({name}): unknown action '{action}'")
 
-    def _handle_line(self, line):
-        """Process a line from the device."""
-        line = line.strip()
-        if not line:
+    def _on_encoder(self, data):
+        """Handle encoder events — adjust master volume."""
+        if data == "PRESS":
+            print("  Encoder pressed")
             return
-
-        # Slider moved
-        if line.startswith("SLIDER,"):
-            parts = line.split(",")
-            if len(parts) == 3:
-                idx = int(parts[1])
-                value = int(parts[2])
-                self._handle_slider(idx, value)
-                if self.on_slider:
-                    self.on_slider(idx, value)
-
-        # Macro button
-        elif line.startswith("MACRO,"):
-            parts = line.split(",")
-            if len(parts) == 3:
-                idx = int(parts[1])
-                action = parts[2]
-                if action == "PRESS":
-                    self._handle_macro(idx)
-                    if self.on_macro:
-                        self.on_macro(idx)
-
-        # Encoder
-        elif line.startswith("ENCODER,"):
-            parts = line.split(",")
-            if len(parts) == 2:
-                if self.on_encoder:
-                    self.on_encoder(parts[1])
-
-        # Connection
-        elif line == "STATE,CONNECTED":
-            print("[Device] Handshake complete")
-
-        # QA result
-        elif line.startswith("QA,"):
-            parts = line.split(",", 2)
-            print(f"[QA] Result: {parts[1]} ({parts[2] if len(parts) > 2 else ''})")
-
-    def _handle_slider(self, idx, value):
-        """Route slider to audio control."""
-        if idx < 0 or idx >= 4:
+        if data == "RELEASE":
             return
-        slider_config = self.config.data["sliders"][idx]
-        app = slider_config.get("app", "")
-        volume = value / 100.0
-
-        if app == "master":
-            self.audio.set_master_volume(volume)
-        elif app:
-            self.audio.set_app_volume(app, volume)
-
-    def _handle_macro(self, idx):
-        """Execute macro action."""
-        if idx < 0 or idx >= 6:
-            return
-        macro = self.config.data["macros"][idx]
-        action = macro.get("action", "")
-        print(f"[Macro] Button {idx + 1}: {macro.get('name', '')} ({action})")
-
-    def send_slider_labels(self):
-        """Send slider labels to device display."""
-        for i, slider in enumerate(self.config.data["sliders"]):
-            label = slider.get("label", f"Slider {i + 1}")
-            self.send(f"VOL,{i},{label},50")
-
-    def send_macro_labels(self):
-        """Send macro labels to device display."""
-        for i, macro in enumerate(self.config.data["macros"]):
-            name = macro.get("name", f"Macro {i + 1}")
-            self.send(f"MACRO,{i},{name},")
+        try:
+            delta = int(data)
+            if self.audio.master:
+                cur = self.audio.master.GetMasterVolumeLevelScalar()
+                new = max(0.0, min(1.0, cur + delta * 0.02))
+                self.audio.master.SetMasterVolumeLevelScalar(new, None)
+                print(f"  Encoder: master volume {int(new * 100)}%")
+        except Exception:
+            pass
 
     def run(self):
-        """Main read loop — call from a thread."""
+        """Main loop — read serial and dispatch."""
         self.running = True
-        self.send_slider_labels()
-        self.send_macro_labels()
-
         while self.running and self.connected:
             try:
-                if self.serial.in_waiting:
-                    line = self.serial.readline().decode("utf-8", errors="ignore")
-                    self._handle_line(line)
+                if self.ser.in_waiting:
+                    line = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                    if not line:
+                        continue
+
+                    parts = line.split(",")
+
+                    if parts[0] == "SLIDER" and len(parts) == 3:
+                        self._on_slider(int(parts[1]), int(parts[2]))
+
+                    elif parts[0] == "MACRO" and len(parts) >= 3:
+                        if parts[2] == "PRESS":
+                            self._on_macro(int(parts[1]))
+
+                    elif parts[0] == "ENCODER" and len(parts) == 2:
+                        self._on_encoder(parts[1])
+
+                    elif line == "STATE,CONNECTED":
+                        print("  Device handshake complete")
+
+                    elif line == "PONG":
+                        pass  # keepalive reply
+
                 else:
                     time.sleep(0.001)
-            except Exception:
+            except serial.SerialException:
                 self.connected = False
                 break
+            except Exception as e:
+                print(f"  Error: {e}")
 
-        print("[Device] Disconnected")
+    def stop(self):
+        self.running = False
+        if self.ser:
+            self.ser.close()
+        self.connected = False
 
+def _send_keys(combo):
+    """Send a keyboard shortcut like 'ctrl+shift+s'."""
+    try:
+        import ctypes
+        VK_MAP = {
+            "ctrl": 0x11, "shift": 0x10, "alt": 0x12, "win": 0x5B,
+            "tab": 0x09, "enter": 0x0D, "esc": 0x1B, "space": 0x20,
+            "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73,
+            "f5": 0x74, "f6": 0x75, "f7": 0x76, "f8": 0x77,
+            "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
+        }
+        keys = [k.strip().lower() for k in combo.split("+")]
+        vks = []
+        for k in keys:
+            if k in VK_MAP:
+                vks.append(VK_MAP[k])
+            elif len(k) == 1:
+                vks.append(ord(k.upper()))
 
-# =================== System Stats ===================
+        for vk in vks:
+            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+        time.sleep(0.05)
+        for vk in reversed(vks):
+            ctypes.windll.user32.keybd_event(vk, 0, 0x0002, 0)
+    except Exception:
+        pass
 
-def get_system_stats():
-    """Get CPU, RAM, GPU usage for device widgets."""
-    cpu = psutil.cpu_percent(interval=0)
-    ram = psutil.virtual_memory().percent
-    return {"cpu": cpu, "ram": ram}
+# =================== CLI ===================
 
+def print_config(config):
+    """Pretty print current config."""
+    print("\n  Slider Assignments:")
+    for i, s in enumerate(config["sliders"]):
+        app = s.get("app", "") or "(unassigned)"
+        label = s.get("label", f"Slider {i+1}")
+        print(f"    Slider {i+1}: {label} -> {app}")
 
-# =================== Main ===================
+    print("\n  Macro Assignments:")
+    for i, m in enumerate(config["macros"]):
+        name = m.get("name", f"Macro {i+1}")
+        action = m.get("action", "none")
+        print(f"    Button {i+1}: {name} -> {action}")
+    print()
+
+def setup_wizard(config, audio):
+    """Interactive setup for slider and macro assignments."""
+    print("\n=== Mixlar Mix Setup ===\n")
+
+    # Show available apps
+    sessions = audio.list_sessions()
+    if sessions:
+        print("  Active audio apps:")
+        for app in sessions:
+            print(f"    - {app}")
+    print()
+
+    # Slider setup
+    print("  Assign apps to sliders (or press Enter to skip):")
+    print("  Special names: 'master' = system volume\n")
+    for i in range(4):
+        current = config["sliders"][i].get("app", "")
+        app = input(f"  Slider {i+1} [{current}]: ").strip()
+        if app:
+            config["sliders"][i]["app"] = app
+            config["sliders"][i]["label"] = app.capitalize()
+
+    # Macro setup
+    print("\n  Assign actions to macros:")
+    print("  Built-in: mute_toggle, media_playpause, media_next, media_prev, vol_up, vol_down")
+    print("  Custom:   run:notepad.exe  |  key:ctrl+shift+s\n")
+    for i in range(6):
+        current = config["macros"][i].get("action", "none")
+        action = input(f"  Button {i+1} [{current}]: ").strip()
+        if action:
+            config["macros"][i]["action"] = action
+            # Auto-name from action
+            if action in MACRO_ACTIONS:
+                config["macros"][i]["name"] = action.replace("_", " ").title()
+            elif action.startswith("run:"):
+                config["macros"][i]["name"] = action[4:].split("/")[-1].split("\\")[-1]
+            elif action.startswith("key:"):
+                config["macros"][i]["name"] = action[4:].upper()
+
+    save_config(config)
+    print("\n  Config saved to", CONFIG_FILE)
 
 def main():
-    print("Mixlar Mix Control Software v2.0.0")
-    print("===================================")
+    print()
+    print("  Mixlar Mix v2.0")
+    print("  ===============")
 
-    device = MixlarDevice()
+    config = load_config()
+    audio = AudioMixer()
 
-    # Auto-discover and connect
-    port = find_mixlar_port()
-    if port:
-        print(f"Found Mixlar Mix on {port}")
-        if device.connect(port):
-            # Run in background thread
-            thread = threading.Thread(target=device.run, daemon=True)
-            thread.start()
+    # Parse args
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "setup":
+            setup_wizard(config, audio)
+            return
+        elif sys.argv[1] == "config":
+            print_config(config)
+            return
+        elif sys.argv[1] == "list":
+            print("\n  Active audio sessions:")
+            for app in audio.list_sessions():
+                print(f"    - {app}")
+            print()
+            return
 
-            print("Listening for device events. Press Ctrl+C to quit.")
-            try:
-                while device.connected:
-                    time.sleep(1)
-            except KeyboardInterrupt:
-                pass
-            finally:
-                device.disconnect()
-    else:
-        print("Mixlar Mix not found. Connect via USB-C and try again.")
-        print("Available serial ports:")
-        for port in serial.tools.list_ports.comports():
-            print(f"  {port.device}: {port.description}")
+    # Show current config
+    print_config(config)
 
+    # Find and connect
+    port = find_device()
+    if not port:
+        print("  Mixlar Mix not found. Connect via USB-C and try again.")
+        print("  Available ports:")
+        for p in serial.tools.list_ports.comports():
+            print(f"    {p.device}: {p.description}")
+        return
+
+    print(f"  Found device on {port}")
+
+    ctrl = MixlarController()
+    ctrl.config = config
+    if not ctrl.connect(port):
+        return
+
+    print("  Connected! Listening for events...\n")
+
+    try:
+        ctrl.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ctrl.stop()
+        print("\n  Disconnected.")
 
 if __name__ == "__main__":
     main()

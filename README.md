@@ -74,12 +74,52 @@ python mixlar.py
 
 ### Features
 
-- Per-app audio volume control
-- Macro button configuration
-- Slider assignment (app volumes, system, MIDI)
-- Live device status monitoring
-- Spotify integration
-- OBS Studio integration
+- Per-app audio volume control (assign any app to any slider)
+- Configurable macro buttons (media keys, keyboard shortcuts, launch apps)
+- Encoder for master volume
+- Simple JSON config (`~/.mixlar/config.json`)
+- Auto-detect device on USB
+
+### Commands
+
+```bash
+python mixlar.py           # Connect and run
+python mixlar.py setup     # Interactive setup wizard
+python mixlar.py config    # Show current config
+python mixlar.py list      # List active audio apps
+```
+
+### Config Example
+
+Edit `~/.mixlar/config.json`:
+
+```json
+{
+  "sliders": [
+    {"app": "master", "label": "Master"},
+    {"app": "spotify", "label": "Spotify"},
+    {"app": "chrome", "label": "Chrome"},
+    {"app": "discord", "label": "Discord"}
+  ],
+  "macros": [
+    {"name": "Mute", "action": "mute_toggle"},
+    {"name": "Play/Pause", "action": "media_playpause"},
+    {"name": "Next Track", "action": "media_next"},
+    {"name": "Prev Track", "action": "media_prev"},
+    {"name": "Save", "action": "key:ctrl+s"},
+    {"name": "Notepad", "action": "run:notepad.exe"}
+  ]
+}
+```
+
+### Macro Action Types
+
+| Format | Example | What it does |
+|--------|---------|-------------|
+| Built-in | `mute_toggle` | System mute toggle |
+| Built-in | `media_playpause` | Play/Pause media |
+| Keyboard | `key:ctrl+shift+s` | Send keyboard shortcut |
+| Launch | `run:notepad.exe` | Run a program |
 
 ## Serial Protocol
 

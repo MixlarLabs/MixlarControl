@@ -1,28 +1,18 @@
 // Mixlar Mix Firmware for ESP32-S3
-// USB Composite: CDC (Serial) + MIDI + Mass Storage
+// Reads sliders, buttons, and encoder — sends events over USB serial.
+// The Python software (mixlar.py) handles audio routing and macros.
 // License: MIT
-// https://mixlar.net
 
 #include <USB.h>
 #include <USBMIDI.h>
-#include <USBMSC.h>
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 #include <RotaryEncoder.h>
 #include <Preferences.h>
-#include <lvgl.h>
 #include <TFT_eSPI.h>
-
-// =================== Board Config ===================
-// Board: ESP32-S3 Dev Module
-// USB Mode: USB-OTG (TinyUSB)
-// USB CDC On Boot: Enabled
-// PSRAM: OPI PSRAM
-// Flash: 16MB (64Mb)
 
 // =================== USB ===================
 USBMIDI usbMIDI;
-USBMSC msc;
 
 // =================== Display ===================
 static const uint16_t screenWidth = 320;
@@ -37,245 +27,92 @@ Adafruit_ADS1015 ads;
 bool adsPresent = false;
 
 // =================== Sliders ===================
-int previousValues[4] = {0};
-const int SLIDER_THRESHOLD = 15;
-int sliderCalMinRaw[4] = {0, 0, 0, 0};
-int sliderCalMaxRaw[4] = {1650, 1650, 1650, 1650};
+int prevSlider[4] = {0};
+const int THRESHOLD = 12;
 
 // =================== Buttons ===================
-const int MACRO_PINS[6] = {7, 15, 10, 13, 47, 48};
-bool macroButtonState[6] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
-bool lastMacroButtonState[6] = {HIGH, HIGH, HIGH, HIGH, HIGH, HIGH};
+const int BTN_PINS[6] = {7, 15, 10, 13, 47, 48};
+bool btnState[6] = {1, 1, 1, 1, 1, 1};
+bool btnPrev[6]  = {1, 1, 1, 1, 1, 1};
 
 // =================== Encoder ===================
 #define ENC_CLK 38
 #define ENC_DT  39
 #define ENC_SW  40
 RotaryEncoder encoder(ENC_CLK, ENC_DT, RotaryEncoder::LatchMode::FOUR0);
-long lastEncoderPos = 0;
+long lastEncPos = 0;
+bool encDown = false;
 
 // =================== Touch ===================
-#define TOUCH_INT_PIN 14
-#define CST816S_ADDR  0x15
-bool touchPresent = false;
+#define TOUCH_INT 14
+#define TOUCH_ADDR 0x15
+bool touchOk = false;
 
 // =================== State ===================
 Preferences prefs;
-bool isConnected = false;
-bool psramAvailable = false;
-int backlightBrightness = 100;
-unsigned long lastCmdTime = 0;
+bool connected = false;
+char cmdBuf[256];
+int cmdPos = 0;
 
-// =================== Mode ===================
-enum DeviceMode { MODE_PC_CONTROL, MODE_MIDI_DEVICE };
-DeviceMode deviceMode = MODE_PC_CONTROL;
+// =================== MIDI config ===================
+uint8_t midiCC[4] = {1, 2, 3, 4};
+uint8_t midiCh[4] = {1, 1, 1, 1};
+uint8_t midiNote[6] = {36, 37, 38, 39, 40, 41};
+bool midiMode = false;
 
-// =================== MIDI Config ===================
-uint8_t midiSliderCC[4] = {1, 2, 3, 4};
-uint8_t midiSliderChannel[4] = {1, 1, 1, 1};
-uint8_t midiMacroNote[6] = {36, 37, 38, 39, 40, 41};
-uint8_t midiMacroChannel[6] = {1, 1, 1, 1, 1, 1};
-uint8_t midiMacroVelocity[6] = {127, 127, 127, 127, 127, 127};
-
-// =================== Serial Buffer ===================
-char serialBuffer[512];
-int serialBufferPos = 0;
-
-// =================== Calibration ===================
-int mapWithCalibration(int rawValue, int sliderIdx = 0) {
-  int minRaw = sliderCalMinRaw[sliderIdx];
-  int maxRaw = sliderCalMaxRaw[sliderIdx];
-  if (maxRaw <= minRaw) return 0;
-  int mapped = map(rawValue, maxRaw, minRaw, 0, 1000);
-  return constrain(mapped, 0, 1000);
+// =================== Slider reading ===================
+int readSlider(int ch) {
+  int raw = ads.readADC_SingleEnded(ch);
+  int mapped = map(raw, 1650, 0, 0, 100);
+  return constrain(mapped, 0, 100);
 }
 
-// =================== Touch ===================
-int touchReadPoint(uint16_t &x, uint16_t &y) {
-  Wire.beginTransmission(CST816S_ADDR);
-  Wire.write(0x02);
-  if (Wire.endTransmission(false) != 0) return 0;
-
-  uint8_t buf[5];
-  Wire.requestFrom((uint8_t)CST816S_ADDR, (uint8_t)5);
-  for (int i = 0; i < 5 && Wire.available(); i++) buf[i] = Wire.read();
-
-  int touches = buf[0] & 0x0F;
-  if (touches == 0 || touches > 2) return 0;
-
-  uint16_t raw_x = ((buf[1] & 0x0F) << 8) | buf[2];
-  uint16_t raw_y = ((buf[3] & 0x0F) << 8) | buf[4];
-
-  // Portrait to landscape conversion
-  x = 479 - raw_y;
-  y = raw_x;
-
-  return touches;
-}
-
-void initTouch() {
-  pinMode(TOUCH_INT_PIN, INPUT);
-  Wire.beginTransmission(CST816S_ADDR);
-  if (Wire.endTransmission() == 0) {
-    touchPresent = true;
-    Serial.println("CST816S touch controller initialized");
-  } else {
-    touchPresent = false;
-    Serial.println("CST816S not found — touch disabled");
-  }
-}
-
-// =================== Slider Reading ===================
 void updateSliders() {
-  if (!adsPresent || deviceMode == MODE_MIDI_DEVICE) return;
+  if (!adsPresent) return;
 
   for (int i = 0; i < 4; i++) {
-    int rawValue = ads.readADC_SingleEnded(i);
-    int mappedValue = mapWithCalibration(rawValue, i);
+    int val = readSlider(i);
+    if (abs(val - prevSlider[i]) > 1) {
+      prevSlider[i] = val;
 
-    if (mappedValue > 0 && mappedValue <= 20) mappedValue = 0;
-
-    int absChange = abs(mappedValue - previousValues[i]);
-    if (absChange > SLIDER_THRESHOLD) {
-      previousValues[i] = mappedValue;
-      int percent = mappedValue / 10;
-      Serial.printf("SLIDER,%d,%d\n", i, percent);
+      if (midiMode) {
+        // Rate-limited MIDI CC
+        static unsigned long lastSend[4] = {0};
+        if (millis() - lastSend[i] >= 10) {
+          usbMIDI.controlChange(midiCC[i], map(val, 0, 100, 0, 127), midiCh[i]);
+          lastSend[i] = millis();
+        }
+      } else {
+        Serial.printf("SLIDER,%d,%d\n", i, val);
+      }
     }
   }
 }
 
-// =================== MIDI Slider Updates ===================
-void updateMidiSliders() {
-  if (!adsPresent || deviceMode != MODE_MIDI_DEVICE) return;
-
-  static unsigned long lastMidiSendTime[4] = {0, 0, 0, 0};
-  static uint8_t pendingMidiValue[4] = {255, 255, 255, 255};
-  unsigned long now = millis();
-
-  for (int i = 0; i < 4; i++) {
-    int rawValue = ads.readADC_SingleEnded(i);
-    int mappedValue = mapWithCalibration(rawValue, i);
-
-    if (mappedValue > 0 && mappedValue <= 20) mappedValue = 0;
-
-    int absChange = abs(mappedValue - previousValues[i]);
-    if (absChange > SLIDER_THRESHOLD) {
-      previousValues[i] = mappedValue;
-      int percent = mappedValue / 10;
-      pendingMidiValue[i] = map(percent, 0, 100, 0, 127);
-    }
-
-    // Rate-limited MIDI send (max 1 per 10ms per slider)
-    if (pendingMidiValue[i] != 255 && (now - lastMidiSendTime[i] >= 10)) {
-      uint8_t ch = (midiSliderChannel[i] - 1) & 0x0F;
-      usbMIDI.controlChange(midiSliderCC[i], pendingMidiValue[i], midiSliderChannel[i]);
-      lastMidiSendTime[i] = now;
-      pendingMidiValue[i] = 255;
-    }
-  }
-}
-
-// =================== Button Reading ===================
-void updateMacroButtons() {
+// =================== Button reading ===================
+void updateButtons() {
   for (int i = 0; i < 6; i++) {
-    macroButtonState[i] = digitalRead(MACRO_PINS[i]);
+    btnState[i] = digitalRead(BTN_PINS[i]);
 
-    if (macroButtonState[i] == LOW && lastMacroButtonState[i] == HIGH) {
-      if (deviceMode == MODE_PC_CONTROL) {
+    // Press
+    if (btnState[i] == LOW && btnPrev[i] == HIGH) {
+      if (midiMode) {
+        usbMIDI.noteOn(midiNote[i], 127, 1);
+      } else {
         Serial.printf("MACRO,%d,PRESS\n", i);
-      } else {
-        // MIDI note on
-        usbMIDI.noteOn(midiMacroNote[i], midiMacroVelocity[i], midiMacroChannel[i]);
       }
     }
 
-    if (macroButtonState[i] == HIGH && lastMacroButtonState[i] == LOW) {
-      if (deviceMode == MODE_PC_CONTROL) {
+    // Release
+    if (btnState[i] == HIGH && btnPrev[i] == LOW) {
+      if (midiMode) {
+        usbMIDI.noteOff(midiNote[i], 0, 1);
+      } else {
         Serial.printf("MACRO,%d,RELEASE\n", i);
-      } else {
-        usbMIDI.noteOff(midiMacroNote[i], 0, midiMacroChannel[i]);
       }
     }
 
-    lastMacroButtonState[i] = macroButtonState[i];
-  }
-}
-
-// =================== Serial Commands ===================
-void processSerialCommand(const char* cmd) {
-  lastCmdTime = millis();
-
-  if (!isConnected) {
-    isConnected = true;
-    Serial.println("STATE,CONNECTED");
-  }
-
-  if (strcmp(cmd, "PING") == 0) {
-    Serial.println("PONG");
-    return;
-  }
-
-  if (strcmp(cmd, "READY") == 0) {
-    Serial.println("ACK,READY");
-    Serial.printf("DEV_TYPE,Mixlar Mix\n");
-    Serial.printf("FW_VER,2.0.0\n");
-    return;
-  }
-
-  if (strcmp(cmd, "VER") == 0) {
-    Serial.println("VER,2.0.0");
-    return;
-  }
-
-  if (strcmp(cmd, "DEV_TYPE") == 0) {
-    Serial.println("DEV_TYPE,Mixlar Mix");
-    return;
-  }
-
-  // VOL,<idx>,<appname>,<volume>
-  if (strncmp(cmd, "VOL,", 4) == 0) {
-    // Update slider assignment — parsed by UI layer
-    Serial.printf("ACK,%s\n", cmd);
-    return;
-  }
-
-  // MACRO,<idx>,<name>,<icon>
-  if (strncmp(cmd, "MACRO,", 6) == 0) {
-    Serial.printf("ACK,%s\n", cmd);
-    return;
-  }
-
-  // BRIGHTNESS,<0-100>
-  if (strncmp(cmd, "BRIGHTNESS,", 11) == 0) {
-    int val = atoi(cmd + 11);
-    backlightBrightness = constrain(val, 0, 100);
-    analogWrite(backlightPin, map(backlightBrightness, 0, 100, 0, 255));
-    Serial.printf("ACK,BRIGHTNESS,%d\n", backlightBrightness);
-    return;
-  }
-
-  if (strcmp(cmd, "REBOOT") == 0) {
-    Serial.println("REBOOTING");
-    delay(100);
-    ESP.restart();
-    return;
-  }
-}
-
-void readSerialCommands() {
-  int cmdCount = 0;
-  while (Serial.available() && cmdCount < 8) {
-    char c = Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (serialBufferPos > 0) {
-        serialBuffer[serialBufferPos] = '\0';
-        processSerialCommand(serialBuffer);
-        serialBufferPos = 0;
-        cmdCount++;
-      }
-    } else if (serialBufferPos < (int)sizeof(serialBuffer) - 1) {
-      serialBuffer[serialBufferPos++] = c;
-    }
+    btnPrev[i] = btnState[i];
   }
 }
 
@@ -283,114 +120,138 @@ void readSerialCommands() {
 void updateEncoder() {
   encoder.tick();
   long pos = encoder.getPosition();
-  if (pos != lastEncoderPos) {
-    long delta = pos - lastEncoderPos;
-    lastEncoderPos = pos;
-    if (deviceMode == MODE_PC_CONTROL) {
-      Serial.printf("ENCODER,%ld\n", delta);
+  if (pos != lastEncPos) {
+    long delta = pos - lastEncPos;
+    lastEncPos = pos;
+    Serial.printf("ENCODER,%ld\n", delta);
+  }
+
+  bool sw = digitalRead(ENC_SW);
+  if (sw == LOW && !encDown) {
+    encDown = true;
+    Serial.println("ENCODER,PRESS");
+  }
+  if (sw == HIGH && encDown) {
+    encDown = false;
+    Serial.println("ENCODER,RELEASE");
+  }
+}
+
+// =================== Touch init ===================
+void initTouch() {
+  pinMode(TOUCH_INT, INPUT);
+  Wire.beginTransmission(TOUCH_ADDR);
+  touchOk = (Wire.endTransmission() == 0);
+  Serial.printf("Touch: %s\n", touchOk ? "OK" : "not found");
+}
+
+// =================== Serial commands ===================
+void processCommand(const char* cmd) {
+  if (!connected) {
+    connected = true;
+    Serial.println("STATE,CONNECTED");
+  }
+
+  if (strcmp(cmd, "PING") == 0) {
+    Serial.println("PONG");
+  }
+  else if (strcmp(cmd, "READY") == 0) {
+    Serial.println("ACK,READY");
+    Serial.println("DEV_TYPE,Mixlar Mix");
+    Serial.println("FW_VER,2.0.0");
+  }
+  else if (strcmp(cmd, "VER") == 0) {
+    Serial.println("VER,2.0.0");
+  }
+  else if (strncmp(cmd, "VOL,", 4) == 0) {
+    Serial.printf("ACK,%s\n", cmd);
+  }
+  else if (strncmp(cmd, "MACRO,", 6) == 0) {
+    Serial.printf("ACK,%s\n", cmd);
+  }
+  else if (strncmp(cmd, "BRIGHTNESS,", 11) == 0) {
+    int b = constrain(atoi(cmd + 11), 0, 100);
+    analogWrite(backlightPin, map(b, 0, 100, 0, 255));
+    Serial.printf("ACK,BRIGHTNESS,%d\n", b);
+  }
+  else if (strcmp(cmd, "REBOOT") == 0) {
+    Serial.println("REBOOTING");
+    delay(100);
+    ESP.restart();
+  }
+}
+
+void readSerial() {
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (cmdPos > 0) {
+        cmdBuf[cmdPos] = '\0';
+        processCommand(cmdBuf);
+        cmdPos = 0;
+      }
+    } else if (cmdPos < 255) {
+      cmdBuf[cmdPos++] = c;
     }
   }
 }
 
-// =================== Backlight ===================
-void applyBrightness(int percent) {
-  int pwmValue = map(percent, 0, 100, 0, 255);
-  analogWrite(backlightPin, pwmValue);
-}
-
 // =================== Setup ===================
 void setup() {
-  // USB init first
+  // USB
   USB.VID(0x1209);
   USB.PID(0x4D58);
   USB.productName("Mixlar Mix");
   USB.manufacturerName("MixlarLabs");
   usbMIDI.begin();
-  Serial.setRxBufferSize(16384);
   Serial.setTxTimeoutMs(0);
   Serial.begin(2000000);
   USB.begin();
   delay(200);
 
-  // Backlight off during init
+  // Display
   pinMode(backlightPin, OUTPUT);
   analogWrite(backlightPin, 0);
-
-  // Display
   tft.begin();
   tft.setRotation(1);
-  tft.setSwapBytes(true);
   tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(40, 100);
+  tft.print("Mixlar Mix");
+  tft.setTextSize(1);
+  tft.setCursor(40, 130);
+  tft.print("Waiting for connection...");
+  analogWrite(backlightPin, 255);
 
-  // PSRAM
-  psramAvailable = psramFound();
-  if (psramAvailable) {
-    Serial.printf("[PSRAM] %u bytes available\n", ESP.getPsramSize());
-  }
-
-  // I2C
+  // I2C + ADC
   Wire.begin(I2C_SDA, I2C_SCL);
   Wire.setClock(400000);
-
-  // ADS1115
-  if (ads.begin()) {
+  adsPresent = ads.begin();
+  if (adsPresent) {
     ads.setGain(GAIN_ONE);
-    ads.setDataRate(RATE_ADS1115_860SPS);
-    adsPresent = true;
-    Serial.println("ADS1115 initialized");
+    Serial.println("ADC: OK");
   } else {
-    Serial.println("ADS1115 init failed — sliders disabled");
+    Serial.println("ADC: not found");
   }
 
   // Touch
   initTouch();
 
   // Buttons
-  for (int i = 0; i < 6; i++) {
-    pinMode(MACRO_PINS[i], INPUT_PULLUP);
-  }
+  for (int i = 0; i < 6; i++) pinMode(BTN_PINS[i], INPUT_PULLUP);
 
   // Encoder
   pinMode(ENC_SW, INPUT_PULLUP);
 
-  // Load settings
-  prefs.begin("settings", true);
-  backlightBrightness = prefs.getInt("brightness", 100);
-  for (int i = 0; i < 4; i++) {
-    char key[16];
-    snprintf(key, sizeof(key), "slCal%dMin", i);
-    sliderCalMinRaw[i] = prefs.getInt(key, 0);
-    snprintf(key, sizeof(key), "slCal%dMax", i);
-    sliderCalMaxRaw[i] = prefs.getInt(key, 26500);
-  }
-  prefs.end();
-
-  // Backlight on
-  applyBrightness(backlightBrightness);
-
   Serial.println("Mixlar Mix ready");
-  Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
 }
 
 // =================== Loop ===================
 void loop() {
-  readSerialCommands();
+  readSerial();
   updateSliders();
-  updateMidiSliders();
-  updateMacroButtons();
+  updateButtons();
   updateEncoder();
-
-  // Encoder button
-  static bool encDown = false;
-  bool encState = digitalRead(ENC_SW);
-  if (encState == LOW && !encDown) {
-    encDown = true;
-    Serial.println("ENCODER,PRESS");
-  }
-  if (encState == HIGH && encDown) {
-    encDown = false;
-    Serial.println("ENCODER,RELEASE");
-  }
-
   delay(1);
 }
