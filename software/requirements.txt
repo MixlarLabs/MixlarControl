@@ -1,0 +1,4 @@
+pyserial>=3.5
+pycaw>=20230407
+psutil>=5.9
+comtypes>=1.2
