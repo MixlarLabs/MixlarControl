@@ -1,0 +1,18 @@
+{
+  "name": "Music Production",
+  "description": "DAW mixing with transport controls",
+  "sliders": [
+    {"app": "master", "label": "Master"},
+    {"app": "fl64", "label": "FL Studio"},
+    {"app": "ableton live", "label": "Ableton"},
+    {"app": "spotify", "label": "Reference"}
+  ],
+  "macros": [
+    {"name": "Play", "action": "key:space"},
+    {"name": "Record", "action": "key:r"},
+    {"name": "Undo", "action": "key:ctrl+z"},
+    {"name": "Save", "action": "key:ctrl+s"},
+    {"name": "Metronome", "action": "key:ctrl+m"},
+    {"name": "Loop", "action": "key:ctrl+l"}
+  ]
+}

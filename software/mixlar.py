@@ -425,6 +425,70 @@ def main():
                 print(f"    - {app}")
             print()
             return
+        elif sys.argv[1] == "midi":
+            # MIDI mode — switch device to MIDI and optionally configure
+            port = find_device()
+            if not port:
+                print("  Device not found.")
+                return
+            ser = serial.Serial(port, BAUD_RATE, timeout=0.5)
+            time.sleep(0.3)
+            ser.write(b"MODE,MIDI\n")
+            print("  Switched to MIDI mode")
+            # Apply MIDI config if present
+            midi_conf = config.get("midi", {})
+            for i in range(4):
+                cc = midi_conf.get(f"slider_{i}_cc", i + 1)
+                ch = midi_conf.get(f"slider_{i}_ch", 1)
+                ser.write(f"MIDI,CC,{i},{cc}\n".encode())
+                ser.write(f"MIDI,CH,{i},{ch}\n".encode())
+                print(f"    Slider {i+1}: CC {cc} on channel {ch}")
+            for i in range(6):
+                note = midi_conf.get(f"button_{i}_note", 36 + i)
+                ser.write(f"MIDI,NOTE,{i},{note}\n".encode())
+                print(f"    Button {i+1}: Note {note}")
+            print("\n  Device is now in MIDI mode. Sliders send CC, buttons send notes.")
+            print("  Use 'python mixlar.py pc' to switch back.")
+            ser.close()
+            return
+        elif sys.argv[1] == "pc":
+            # Switch back to PC control mode
+            port = find_device()
+            if not port:
+                print("  Device not found.")
+                return
+            ser = serial.Serial(port, BAUD_RATE, timeout=0.5)
+            time.sleep(0.3)
+            ser.write(b"MODE,PC\n")
+            print("  Switched to PC control mode")
+            ser.close()
+            return
+        elif sys.argv[1] == "preset":
+            # Load a preset config
+            if len(sys.argv) < 3:
+                print("  Available presets:")
+                preset_dir = Path(__file__).parent / "presets"
+                if preset_dir.exists():
+                    for f in sorted(preset_dir.glob("*.json")):
+                        try:
+                            p = json.loads(f.read_text())
+                            print(f"    {f.stem:20s} — {p.get('description', '')}")
+                        except Exception:
+                            print(f"    {f.stem}")
+                print(f"\n  Usage: python mixlar.py preset <name>")
+                return
+            preset_name = sys.argv[2]
+            preset_file = Path(__file__).parent / "presets" / f"{preset_name}.json"
+            if not preset_file.exists():
+                print(f"  Preset '{preset_name}' not found.")
+                return
+            preset = json.loads(preset_file.read_text())
+            config["sliders"] = preset.get("sliders", config["sliders"])
+            config["macros"] = preset.get("macros", config["macros"])
+            save_config(config)
+            print(f"  Loaded preset: {preset.get('name', preset_name)}")
+            print_config(config)
+            return
 
     # Show current config
     print_config(config)

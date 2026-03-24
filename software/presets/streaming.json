@@ -1,0 +1,18 @@
+{
+  "name": "Streaming",
+  "description": "OBS + Discord + game audio mixing",
+  "sliders": [
+    {"app": "master", "label": "Master"},
+    {"app": "obs64", "label": "OBS"},
+    {"app": "discord", "label": "Discord"},
+    {"app": "", "label": "Game"}
+  ],
+  "macros": [
+    {"name": "Mute Mic", "action": "mute_toggle"},
+    {"name": "Start Stream", "action": "key:ctrl+shift+s"},
+    {"name": "Start Rec", "action": "key:ctrl+shift+r"},
+    {"name": "Scene 1", "action": "key:f1"},
+    {"name": "Scene 2", "action": "key:f2"},
+    {"name": "Scene 3", "action": "key:f3"}
+  ]
+}

@@ -87,6 +87,10 @@ python mixlar.py           # Connect and run
 python mixlar.py setup     # Interactive setup wizard
 python mixlar.py config    # Show current config
 python mixlar.py list      # List active audio apps
+python mixlar.py midi      # Switch device to MIDI mode
+python mixlar.py pc        # Switch back to PC control mode
+python mixlar.py preset    # List available presets
+python mixlar.py preset streaming   # Load a preset
 ```
 
 ### Config Example
@@ -120,6 +124,43 @@ Edit `~/.mixlar/config.json`:
 | Built-in | `media_playpause` | Play/Pause media |
 | Keyboard | `key:ctrl+shift+s` | Send keyboard shortcut |
 | Launch | `run:notepad.exe` | Run a program |
+
+### Presets
+
+Presets are pre-made configs for common workflows. Load them with `python mixlar.py preset <name>`.
+
+| Preset | Sliders | Macros |
+|--------|---------|--------|
+| `music-production` | Master, FL Studio, Ableton, Reference | Play, Record, Undo, Save, Metronome, Loop |
+| `streaming` | Master, OBS, Discord, Game | Mute, Start Stream, Start Rec, Scene 1-3 |
+| `gaming` | Master, Discord, Music, Game | Mute, Deafen, Play/Pause, Next, Screenshot, PTT |
+| `video-editing` | Master, Premiere, DaVinci, Music | Play, Cut, Undo, Redo, Render, Save |
+
+### MIDI Mode
+
+Switch to MIDI mode to use the device as a standard USB MIDI controller:
+
+```bash
+python mixlar.py midi      # Switch to MIDI mode
+```
+
+In MIDI mode:
+- Sliders send **CC 1-4** on channel 1
+- Buttons send **Notes 36-41** on channel 1
+- Works with any DAW (Ableton, FL Studio, Logic, Reaper, etc.)
+
+Configure MIDI mappings in `config.json`:
+
+```json
+{
+  "midi": {
+    "slider_0_cc": 7,
+    "slider_0_ch": 1,
+    "slider_1_cc": 10,
+    "button_0_note": 60
+  }
+}
+```
 
 ## Serial Protocol
 

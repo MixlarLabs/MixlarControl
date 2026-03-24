@@ -174,6 +174,60 @@ void processCommand(const char* cmd) {
     analogWrite(backlightPin, map(b, 0, 100, 0, 255));
     Serial.printf("ACK,BRIGHTNESS,%d\n", b);
   }
+  else if (strcmp(cmd, "MODE,MIDI") == 0) {
+    midiMode = true;
+    Serial.println("ACK,MODE,MIDI");
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(40, 60);
+    tft.setTextColor(TFT_ORANGE);
+    tft.print("MIDI Mode");
+    tft.setTextSize(1);
+    tft.setCursor(40, 90);
+    tft.setTextColor(TFT_WHITE);
+    tft.print("Sliders: CC 1-4  |  Buttons: Notes 36-41");
+    tft.setCursor(40, 110);
+    tft.print("Channel: 1");
+  }
+  else if (strcmp(cmd, "MODE,PC") == 0) {
+    midiMode = false;
+    Serial.println("ACK,MODE,PC");
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(40, 100);
+    tft.setTextColor(TFT_WHITE);
+    tft.print("Mixlar Mix");
+    tft.setTextSize(1);
+    tft.setCursor(40, 130);
+    tft.print("PC Control Mode");
+  }
+  // MIDI,CC,<slider>,<cc> — set CC number for a slider
+  else if (strncmp(cmd, "MIDI,CC,", 8) == 0) {
+    int sl = cmd[8] - '0';
+    int cc = atoi(cmd + 10);
+    if (sl >= 0 && sl < 4 && cc >= 0 && cc <= 127) {
+      midiCC[sl] = cc;
+      Serial.printf("ACK,MIDI,CC,%d,%d\n", sl, cc);
+    }
+  }
+  // MIDI,CH,<slider>,<channel> — set MIDI channel for a slider
+  else if (strncmp(cmd, "MIDI,CH,", 8) == 0) {
+    int sl = cmd[8] - '0';
+    int ch = atoi(cmd + 10);
+    if (sl >= 0 && sl < 4 && ch >= 1 && ch <= 16) {
+      midiCh[sl] = ch;
+      Serial.printf("ACK,MIDI,CH,%d,%d\n", sl, ch);
+    }
+  }
+  // MIDI,NOTE,<button>,<note> — set MIDI note for a button
+  else if (strncmp(cmd, "MIDI,NOTE,", 10) == 0) {
+    int btn = cmd[10] - '0';
+    int note = atoi(cmd + 12);
+    if (btn >= 0 && btn < 6 && note >= 0 && note <= 127) {
+      midiNote[btn] = note;
+      Serial.printf("ACK,MIDI,NOTE,%d,%d\n", btn, note);
+    }
+  }
   else if (strcmp(cmd, "REBOOT") == 0) {
     Serial.println("REBOOTING");
     delay(100);

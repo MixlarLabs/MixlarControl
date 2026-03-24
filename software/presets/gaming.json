@@ -1,0 +1,18 @@
+{
+  "name": "Gaming",
+  "description": "Game audio + voice chat + media controls",
+  "sliders": [
+    {"app": "master", "label": "Master"},
+    {"app": "discord", "label": "Discord"},
+    {"app": "spotify", "label": "Music"},
+    {"app": "", "label": "Game"}
+  ],
+  "macros": [
+    {"name": "Mute", "action": "mute_toggle"},
+    {"name": "Deafen", "action": "key:ctrl+shift+d"},
+    {"name": "Play/Pause", "action": "media_playpause"},
+    {"name": "Next Track", "action": "media_next"},
+    {"name": "Screenshot", "action": "key:win+shift+s"},
+    {"name": "Push to Talk", "action": "key:v"}
+  ]
+}
